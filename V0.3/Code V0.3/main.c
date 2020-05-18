@@ -1,0 +1,278 @@
+/*
+	Function Generator with STC MCU
+	
+	GitHub: https://github.com/CreativeLau/Function_Generator_STC
+	
+	Copyright (c) 2020 Creative Lau (CreativeLauLab@gmail.com)
+
+	Permission is hereby granted, free of charge, to any person obtaining a copy
+	of this software and associated documentation files (the "Software"), to deal
+	in the Software without restriction, including without limitation the rights
+	to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+	copies of the Software, and to permit persons to whom the Software is
+	furnished to do so, subject to the following conditions:
+
+	The above copyright notice and this permission notice shall be included in all
+	copies or substantial portions of the Software.
+
+	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+	AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+	SOFTWARE.
+	
+	Version: V0.3
+	MCU Type: STC15W4K32S4 @24MHz
+	YouTube Tutorial: https://youtu.be/c7iSE34SG90
+    Instructable: https://www.instructables.com/id/DIY-Function-Generator-With-STC-MCU-Easily
+    Any question please contact CreativeLauLab@gmail.com
+    YouTube Channel: https://www.youtube.com/c/CreativeLau
+
+	Specification:
+	Output: Single Channel
+	Square Waveform Frequency: 1Hz~2MHz
+	Sine Waveform Frequency: 1Hz~10kHz
+	Amplitude: VCC, about 5V
+	Load ability: Not available
+	Display: LCD1602
+	Controller: EC11 Encoder
+
+	Interface:
+	Bottom left shows the type of waveform(Square/Sine) and output status(ON/OFF)
+	F: Frequency
+	D: Duty of Square Waveform
+	CD: Clock Division Coefficient (For information only)
+	P: PWM frequency for generating Sine Waveform (For information only)
+	Pt: Number of points for generating Sine Waveform (For information only)
+
+	Operations:
+	Single Click Encoder: Switch Frequency and Duty in Square Waveform Interface
+	Double Click Encoder: Start/Stop Signal Output
+	Long Press Encoder: Switch between Square Waveform/Sine Waveform/Voltage Information
+	Rotate Encoder: Adjust Parameters
+
+	Note: 
+	2020-05-06 Update
+	1. Fix an error in main funciton, cause the EC11 Encoder rotate disorder.
+	2. Fix an error of interface display during switch frequency.
+	
+	波形发生器
+	作者：老刘爱捣鼓
+	版本：V0.3
+	单片机型号：STC15W4K32S4 @24MHz
+	任何问题请联系CreativeLauLab@gmail.com
+	B站视频教程：https://www.bilibili.com/video/BV12k4y197Qu
+	老刘爱捣鼓（全网同名）期待您的关注！
+
+	规格：
+	输出：单通道
+	方波：1Hz~2MHz
+	正弦波：1Hz-10kHz
+	波幅：约等于VCC，5V左右
+	带载能力：无带载能力
+	显示屏：LCD1602
+	控制：EC11编码器
+
+	界面：
+	左下角显示波形图标（方波/正弦波）和输出状态（On/OFF）
+	F：频率
+	D：方波占空比
+	CD：时钟分频系数（For information only）
+	P：用于生成正弦波的PWM频率（For information only）
+	Pt：用于生成正弦波的点数（For information only）
+
+	操作：
+	单击编码器：方波界面下，切换频率和占空比
+	双击编码器：开启或关闭波形输出
+	长按编码器：切换方波界面/正弦波界面/电压显示界面
+	旋转编码器：调节参数
+
+	2020-05-06 更新
+	1. 修正main函数循环中会引起编码器旋转混乱的错误
+	   将main函数中while循环中的Update_Flag=0;放到前面清零，放在后面会在编码器高速旋转时，多次触发中断而Update_Flag在最后被清零则无法正确更新LCD
+	2. 修正在切换频率时，界面的显示错误
+*/
+
+#include <reg51.h>
+#include <intrins.h>
+#include "lcd1602.h"
+#include "wave.h"
+#include "settings.h"
+#include "delay.h"
+#include "config_stc.h"
+//#include "uart.h"
+//#include "stdio.h"
+
+#ifndef uint8
+#define uint8 unsigned char
+#endif
+
+#ifndef int8
+#define int8 char
+#endif
+
+#ifndef uint16
+#define uint16 unsigned int
+#endif
+
+#ifndef uint32
+#define uint32 unsigned long int
+#endif
+
+#define TIMER_0 1 //定时器0中断序号
+#define INT_1 2	  //编码器旋转 触发外部中断
+#define INT_0 0	  //编码器按下 触发外部中断
+
+uint8 Timer0_Count;
+bit Update_Flag = 1;
+
+void main(void)
+{
+	//LCD Pin
+	P1M1 &= 0x00; //设置P1口为准双向
+	P1M0 &= 0x00; //设置P1口为准双向
+	P0M1 &= 0x00; //设置P0口为准双向
+	P0M0 &= 0x00; //设置P0口为准双向
+
+	//信号输出Pin
+	PWM3 = 0;	   //设置PWM3 P4.5低电平
+	PWM4 = 0;	   //设置PWM4 P4.4低电平
+	P4M1 |= 0x30;  //设置P4.4(PWM4_2),4.5(PWM3_2)为高阻
+	P4M0 &= ~0x30; //设置P4.4(PWM4_2),4.5(PWM3_2)为高阻
+
+	/* 编码器旋转中断
+	   Interrupt for Encoder Rotation */
+	IT1 = 0; //外部中断1触发方式，上升沿和下降沿
+	PX1 = 1; //外部中断1高优先级
+	EX1 = 1; //开启外部中断1
+
+	/* 编码器按键中断
+	   Interrupt for Encoder Click */
+	IT0 = 1; //外部中断0触发方式，下降沿
+	PX0 = 1; //外部中断0高优先级
+	EX0 = 1; //开启外部中断0
+
+	/* 定时器0，用于更新电压信息计时
+	   Timer 0 for updating the information of VCC*/
+	TMOD &= 0xF0;  //设置定时器0模式 16位自动重载，在Keil中debug的话，请注意，这种设置是8051的旧13位模式
+	AUXR &= ~0x80; //定时器0时钟12T模式
+	TL0 = 0xC0;	   //设置定时初值 24MHz 20ms
+	TH0 = 0x63;	   //设置定时初值 24MHz 20ms
+	ET0 = 1;	   //允许T0溢出中断
+
+	/* 定时器1，用于生成小于50Hz的PWM
+	   Timer 1 for generate the PWM when frequency less than 50Hz*/
+	TMOD &= 0x0F;  //工作模式,0: 16位自动重装
+	AUXR &= ~0x40; //12T
+	ET1 = 1;	   //允许中断
+
+	EA = 1; //开总中断
+
+	//UartInit();
+	//UartInit_interrupt();
+	PWM_Hz_Pre = PWM_Hz;
+	Wave_Shape_Pre = Wave_Shape;
+	Lcd_Init();
+	while (1)
+	{
+		if (Update_Flag)
+		{
+			/*	Update_Flag要马上清零，如果放在Update_LCD后面，会造成假如Update_LCD的过程中再次触发编码器旋转中断的话，
+				在执行完Update_LCD后，在中断中置位的Update_Flag却被清零了，造成LCD没刷新，输出和显示的不一致。
+				另一种方法是在执行Update_LCD前把中断关掉，执行完再打开中断, 但如果这里面的函数执行时间比较长，会产生旋转触发不及时，使用感受卡顿。
+				关中断来避免重复触发是有好处的，可以避免在函数执行过程中多次触发将参数修改掉，
+				函数执行过程中参数被修改，可能会造成计算结果混乱，严重时会造成溢出，甚至单片机复位死机。	*/
+			Update_Flag = 0;
+			Wave_OFF();
+			//EX1 = 0;
+			Update_LCD();
+			Set_Wave_Shape();
+			//IE1=0;
+			//EX1 = 1;
+		}
+	}
+}
+
+/* 编码器旋转响应函数
+   Encoder Rotate */
+void Scan_EC11(void)
+{
+	/* 正转
+	   Rotate clockwise */
+	if ((EC11_A != EC11_B))
+	{
+
+		Change_Val(1);
+	}
+	/* 反转
+	   Rotate anticlockwise*/
+	else if ((EC11_A == EC11_B))
+	{
+		Change_Val(0);
+	}
+}
+
+/* 编码器旋转中断
+   Interrupt for Encoder rotation */
+void INT1_interrupt(void) interrupt INT_1
+{
+	Delay500us();
+	Scan_EC11();
+	Update_Flag = 1;
+	//Delay50ms();
+	IE1 = 0;
+}
+
+/* 编码器点击中断
+   Interrupt for Encoder click */
+void INT0_interrupt(void) interrupt INT_0
+{
+	Delay5ms();
+	if (!EC11_KEY)
+	{
+		/* 长按
+		   Long Press */
+		if (Delay500ms_long_click())
+		{
+			Wave_Shape++;
+			if (Wave_Shape > WAVE_NUM)
+				Wave_Shape = 0;
+			if (Wave_Shape == 2)
+				Options = 1;
+			WAVE_ON = 0;
+			Clear_LCD_Flag = 1;
+		}
+		/* 双击
+		   Double click */
+		else if (Delay200ms_double_click())
+		{
+			if (Wave_Shape > 0)
+			{
+				WAVE_ON = ~WAVE_ON;
+			}
+		}
+		/* 单击
+		   Single click */
+		else
+		{
+			if (Wave_Shape == 1)
+				Options = ~Options;
+		}
+		Update_Flag = 1;
+	}
+	Delay5ms();
+	IE0 = 0;
+}
+
+/* 更新电压信息计时中断
+   Timer interrupt for update voltage information */
+void TIMER0_interrupt() interrupt TIMER_0
+{
+	if (++Timer0_Count > 200) //200x20=4000ms
+	{
+		Timer0_Count = 0;
+		Update_Flag = 1;
+	}
+}
